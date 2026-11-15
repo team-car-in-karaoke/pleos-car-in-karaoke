@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>Pleos Stage Car Wet-Only Audio & Hybrid Zero-Config Signaling Engine</title>
+</head>
+<body style="margin:0;background:#0B0E14;color:#00E5FF;font-family:monospace;font-size:11px;">
+<div id="status">PLEOS CAR ENGINE INITIALIZING...</div>
+<script>
+(function() {
+  const ICE_SERVERS = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' }
+  ];
+
+  const RELAY_BROKERS = [
+    'wss://broker.emqx.io:8084/mqtt',
+    'wss://broker.hivemq.com:8884/mqtt'
+  ];
+
+  let ws = null;
+  let reconnectTimer = null;
+  let peerConnections = new Map();
+  let audioCtx = null;
+  let wetGainNode = null;
+  let dryGainNode = null; // Strictly 0.0 (Wet-Only Reverb Engine)
+  let convolverNode = null;
+  let delayNodeL = null;
+  let delayNodeR = null;
+  let feedbackGain = null;
+  let musicMasterGain = null;
+  let musicAnalyser = null;
+  let musicFreqData = null;
+  let spectrumTimer = null;
+
+  let currentPin = '4829';
+  let currentServerUrl = 'ws://127.0.0.1:8080/ws';
+  let currentKeyShift = 0;
+  let currentEchoLevel = 80;
+  let currentBackingVol = 85;
+  let isPlaying = false;
+  let currentSongId = 'kpop_neon_drive';
+  let customBpm = 124;
+  let schedulerTimer = null;
+  let stepIndex = 0;
+  let webRtcTrackActive = false;
+  let nextPcmPlayTime = 0;
+
+  let lastSyncedCarStateObj = null;
+  let relayMicConnected = false;
+  let relayMicDeviceName = 'Pleos Smart Mic';
+  const myClientId = 'car_' + Math.random().toString(36).substring(2, 10);
+  const relayClients = new Map();
+  const seenMsgIds = new Set();
+  const seenMsgQueue = [];
+
+  function rememberMsgId(rid) {
+    if (!rid) return false;
+    if (seenMsgIds.has(rid)) return true;
+    seenMsgIds.add(rid);
+    seenMsgQueue.push(rid);
+    if (seenMsgQueue.length > 400) {
+      const oldest = seenMsgQueue.shift();
+      seenMsgIds.delete(oldest);
+    }
+    return false;
+  }
+
+  function logBridge(msg) {
+    const el = document.getElementById('status');
+    if (el) el.innerText = String(msg);
+    if (window.PleosCarBridge && window.PleosCarBridge.onEngineLog) {
+      window.PleosCarBridge.onEngineLog(String(msg));
+    }
+  }
+
+  function normalizeWsUrl(rawUrl) {
+    let u = String(rawUrl || 'ws://127.0.0.1:8080/ws').trim();
+    if (!u) u = 'ws://127.0.0.1:8080/ws';
+    if (u.startsWith('http://')) u = 'ws://' + u.substring(7);
+    else if (u.startsWith('https://')) u = 'wss://' + u.substring(8);
+    else if (!u.startsWith('ws://') && !u.startsWith('wss://')) u = 'ws://' + u;
+    u = u.replace(/\/$/, '');
+    if (!u.endsWith('/ws')) u = u + '/ws';
+    return u;
+  }
+
+  // ============================================================================
+  // Zero-Config MQTT v3.1.1 over WSS Cloud Relay Engine (PIN 4829 Topic)
+  // ============================================================================
+  function strToUtf8Bytes(str) {
+    if (typeof TextEncoder !== 'undefined') {
+      return new TextEncoder().encode(str);
+    }
+    const out = [];
+    for (let i = 0; i < str.length; i++) {
+      let c = str.charCodeAt(i);
+      if (c < 0x80) out.push(c);
+      else if (c < 0x800) {
+        out.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
+      } else {
+        out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+      }
+    }
+    return new Uint8Array(out);
+  }
+
+  function utf8BytesToStr(bytes) {
+    if (typeof TextDecoder !== 'undefined') {
+      return new TextDecoder().decode(bytes);
+    }
+    let out = '';
+    for (let i = 0; i < bytes.length; i++) {
+      out += String.fromCharCode(bytes[i]);
+    }
+    try { return decodeURIComponent(escape(out)); } catch (e) { return out; }
+  }
+
+  function encodeMqttRemainingLength(len) {
+    const out = [];
+    do {
+      let digit = len % 128;
+      len = Math.floor(len / 128);
+      if (len > 0) digit = digit | 0x80;
+      out.push(digit);
+    } while (len > 0);
+    return out;
+  }
+
+  function buildMqttConnectPacket(clientId) {
+    const cidBytes = strToUtf8Bytes(clientId);
+    const varHeader = [0x00, 0x04, 0x4D, 0x51, 0x54, 0x54, 0x04, 0x02, 0x00, 0x1E];
+    const remLen = varHeader.length + 2 + cidBytes.length;
+    const remBytes = encodeMqttRemainingLength(remLen);
+    const pkt = new Uint8Array(1 + remBytes.length + remLen);
+    let idx = 0;
+    pkt[idx++] = 0x10;
+    for (let i = 0; i < remBytes.length; i++) pkt[idx++] = remBytes[i];
+    for (let i = 0; i < varHeader.length; i++) pkt[idx++] = varHeader[i];
+    pkt[idx++] = (cidBytes.length >> 8) & 0xFF;
+    pkt[idx++] = cidBytes.length & 0xFF;
+    pkt.set(cidBytes, idx);
+    return pkt;
+  }
+
+  function buildMqttSubscribePacket(topic) {
+    const topBytes = strToUtf8Bytes(topic);
+    const remLen = 2 + 2 + topBytes.length + 1;
+    const remBytes = encodeMqttRemainingLength(remLen);
+    const pkt = new Uint8Array(1 + remBytes.length + remLen);
+    let idx = 0;
+    pkt[idx++] = 0x82;
+    for (let i = 0; i < remBytes.length; i++) pkt[idx++] = remBytes[i];
+    pkt[idx++] = 0x00;
+    pkt[idx++] = 0x01;
+    pkt[idx++] = (topBytes.length >> 8) & 0xFF;
+    pkt[idx++] = topBytes.length & 0xFF;
+    pkt.set(topBytes, idx);
+    idx += topBytes.length;
+    pkt[idx] = 0x00;
+    return pkt;
+  }
+
+  function buildMqttPublishPacket(topic, jsonStr) {
+    const topBytes = strToUtf8Bytes(topic);
+    const payBytes = strToUtf8Bytes(jsonStr);
+    const remLen = 2 + topBytes.length + payBytes.length;
+    const remBytes = encodeMqttRemainingLength(remLen);
+    const pkt = new Uint8Array(1 + remBytes.length + remLen);
+    let idx = 0;
+    pkt[idx++] = 0x30;
+    for (let i = 0; i < remBytes.length; i++) pkt[idx++] = remBytes[i];
+    pkt[idx++] = (topBytes.length >> 8) & 0xFF;
+    pkt[idx++] = topBytes.length & 0xFF;
+    pkt.set(topBytes, idx);
+    idx += topBytes.length;
+    pkt.set(payBytes, idx);
+    return pkt;
+  }
+
+  function getRelayTopic(pin) {
+    return 'pleos-stage/karaoke/pin-' + String(pin || currentPin || '4829').trim();
+  }
+
+  function publishRelayEvent(event, dataObj) {
+    const topic = getRelayTopic(currentPin);
+    const rid = myClientId + '_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
+    rememberMsgId(rid);
+    const payload = JSON.stringify({
+      senderId: myClientId,
+      rid: rid,
+      role: 'car',
+      event: event,
+      data: dataObj || {},
+      ts: Date.now()
+    });
+    const pkt = buildMqttPublishPacket(topic, payload);
+    relayClients.forEach((entry) => {
+      if (entry && entry.ready && entry.socket && entry.socket.readyState === WebSocket.OPEN) {
+        try {
+          entry.socket.send(pkt);
+        } catch (e) {}
+      }
+    });
+  }
+
+  function parseIncomingMqttFrame(brokerUrl, entry, arrayBuf) {
+    const u8 = new Uint8Array(arrayBuf);
+    let offset = 0;
+    while (offset < u8.length) {
+      const headerByte = u8[offset];
+      const pktType = headerByte & 0xF0;
+      let multiplier = 1;
+      let remLen = 0;
+      let lenIdx = offset + 1;
+      let valid = true;
+      while (true) {
+        if (lenIdx >= u8.length) { valid = false; break; }
+        const encodedByte = u8[lenIdx++];
+        remLen += (encodedByte & 127) * multiplier;
+        multiplier *= 128;
+        if ((encodedByte & 128) === 0) break;
+        if (multiplier > 128 * 128 * 128) { valid = false; break; }
+      }
+      if (!valid || lenIdx + remLen > u8.length) break;
+
+      const bodyStart = lenIdx;
+      const bodyEnd = bodyStart + remLen;
+
+      if (pktType === 0x20) {
+        entry.ready = true;
+        const topic = getRelayTopic(currentPin);
+        entry.subscribedTopic = topic;
+        try {
+          entry.socket.send(buildMqttSubscribePacket(topic));
+        } catch (e) {}
+        logBridge('Zero-Config Cloud Relay Active (' + topic + ')');
+        publishRelayEvent('car-ready', {
+          pin: currentPin,
+          state: lastSyncedCarStateObj
+        });
+      } else if (pktType === 0x90) {
+        publishRelayEvent('car-ready', {
+          pin: currentPin,
+          state: lastSyncedCarStateObj
+        });
+        if (lastSyncedCarStateObj) {
+          publishRelayEvent('car-state-sync', {
+            ...lastSyncedCarStateObj,
+            pin: currentPin
+          });
+        }
+      } else if (pktType === 0x30) {
+        if (bodyStart + 2 <= bodyEnd) {
+          const topLen = (u8[bodyStart] << 8) | u8[bodyStart + 1];
+          let payStart = bodyStart + 2 + topLen;
+          const qos = (headerByte >> 1) & 0x03;
+          if (qos > 0) payStart += 2;
+          if (payStart <= bodyEnd) {
+            const payBytes = u8.subarray(payStart, bodyEnd);
+            const rawJson = utf8BytesToStr(payBytes);
+            try {
+              const obj = JSON.parse(rawJson);
+              if (obj && obj.senderId !== myClientId && obj.role !== 'car') {
+                if (!rememberMsgId(obj.rid)) {
+                  handleWsMessage(JSON.stringify({
+                    event: obj.event,
+                    data: obj.data || {}
+                  }), true);
+                }
+              }
+            } catch (e) {}
+          }
+        }
+      }
+      offset = bodyEnd;
+    }
+  }
+
+  function connectRelayBroker(brokerUrl) {
+    const existing = relayClients.get(brokerUrl);
+    if (existing) {
+      if (existing.pingTimer) clearInterval(existing.pingTimer);
+      if (existing.reconnectTimer) clearTimeout(existing.reconnectTimer);
+      if (existing.socket) {
+        try {
+          existing.socket.onclose = null;
+          existing.socket.onerror = null;
+          existing.socket.close();
+        } catch (e) {}
+      }
+    }
+
+    const entry = {
+      url: brokerUrl,
+      socket: null,
+      ready: false,
+      subscribedTopic: '',
+      pingTimer: null,
+      reconnectTimer: null
+    };
+    relayClients.set(brokerUrl, entry);
+
+    let sock = null;
+    try {
+      sock = new WebSocket(brokerUrl, ['mqtt']);
+      sock.binaryType = 'arraybuffer';
+      entry.socket = sock;
+    } catch (e) {
+      entry.reconnectTimer = setTimeout(() => connectRelayBroker(brokerUrl), 1500);
+      return;
+    }
+
+    sock.onopen = () => {
+      try {
+        sock.send(buildMqttConnectPacket(myClientId + '_' + Math.random().toString(36).substring(2, 5)));
+      } catch (e) {}
+      entry.pingTimer = setInterval(() => {
+        if (sock.readyState === WebSocket.OPEN) {
+          try {
+            sock.send(new Uint8Array([0xC0, 0x00]));
+          } catch (e) {}
+        }
+      }, 15000);
+    };
+
+    sock.onmessage = (evt) => {
+      if (evt && evt.data instanceof ArrayBuffer) {
+        parseIncomingMqttFrame(brokerUrl, entry, evt.data);
+      }
+    };
+
+    sock.onerror = () => {};
+
+    sock.onclose = () => {
+      entry.ready = false;
+      if (entry.pingTimer) {
+        clearInterval(entry.pingTimer);
+        entry.pingTimer = null;
+      }
+      entry.reconnectTimer = setTimeout(() => connectRelayBroker(brokerUrl), 1200);
+    };
+  }
+
+  function startAllRelayBrokers() {
+    RELAY_BROKERS.forEach((url) => connectRelayBroker(url));
+  }
+
+  function resubscribeRelayTopic() {
+    const topic = getRelayTopic(currentPin);
+    relayClients.forEach((entry) => {
+      if (entry && entry.ready && entry.socket && entry.socket.readyState === WebSocket.OPEN) {
+        if (entry.subscribedTopic !== topic) {
+          entry.subscribedTopic = topic;
+          try {
+            entry.socket.send(buildMqttSubscribePacket(topic));
+          } catch (e) {}
+        }
+      }
+    });
+  }
+
+  function ensureRelayMicMarkedConnected(deviceName) {
+    if (deviceName) relayMicDeviceName = String(deviceName);
+    if (!relayMicConnected) {
+      relayMicConnected = true;
+      if (window.PleosCarBridge && window.PleosCarBridge.onMicConnectionChanged) {
+        window.PleosCarBridge.onMicConnectionChanged(true, relayMicDeviceName, 1);
+      }
+    }
+  }
+
+  function sendLocalWsOnly(event, dataObj) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify({
+          event: event,
+          data: dataObj || {}
+        }));
+      } catch (e) {}
+    }
+  }
+
+  function sendWsEvent(event, dataObj) {
+    sendLocalWsOnly(event, dataObj);
+    if (event !== 'register-car' && event !== 'phone-outbound-offer') {
+      publishRelayEvent(event, dataObj);
+    }
+  }
+
+  function ensureAudioContext() {
+    return null;
+  }
+
+  function attachVocalStreamToWetEngine(_stream) {
+    webRtcTrackActive = true;
+    logBridge('WebRTC Signaling Connected (Audio Output Routed via Native AudioTrack)');
+  }
+
+  function playPcmChunkThroughWetEngine(pcmArray, sampleRate, fromRelay) {
+    if (!pcmArray || !pcmArray.length) return;
+    if ((fromRelay || currentServerUrl.indexOf('127.0.0.1') === -1) &&
+        window.PleosCarBridge && window.PleosCarBridge.onAudioPcmChunk) {
+      window.PleosCarBridge.onAudioPcmChunk(Number(sampleRate || 16000), pcmArray.join(','));
+    }
+  }
+
+  async function handleWebRtcOffer(fromMicId, sdp) {
+    let pc = peerConnections.get(fromMicId);
+    if (pc) {
+      try { pc.close(); } catch (e) {}
+    }
+
+    pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    peerConnections.set(fromMicId, pc);
+
+    pc.onicecandidate = (evt) => {
+      if (evt.candidate) {
+        sendWsEvent('webrtc-ice-candidate', {
+          pin: currentPin,
+          candidate: evt.candidate
+        });
+      }
+    };
+
+    pc.ontrack = (evt) => {
+      if (evt.streams && evt.streams[0]) {
+        attachVocalStreamToWetEngine(evt.streams[0]);
+        if (window.PleosCarBridge && window.PleosCarBridge.onWebRtcConnected) {
+          window.PleosCarBridge.onWebRtcConnected(fromMicId);
+        }
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+        webRtcTrackActive = false;
+      }
+    };
+
+    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+
+    sendWsEvent('webrtc-answer', {
+      pin: currentPin,
+      sdp: pc.localDescription
+    });
+  }
+
+  function triggerSfx(_sfxType) {}
+
+  function handleWsMessage(rawText, fromRelay) {
+    let msg = null;
+    try {
+      msg = JSON.parse(rawText);
+    } catch (e) {
+      return;
+    }
+    const event = msg.event || msg.type || '';
+    const data = msg.data || msg;
+
+    switch (event) {
+      case 'car-registered':
+        if (data && data.ok) {
+          currentPin = String(data.pin || currentPin);
+          resubscribeRelayTopic();
+          if (window.PleosCarBridge && window.PleosCarBridge.onRoomRegistered) {
+            window.PleosCarBridge.onRoomRegistered(
+              currentPin,
+              String(data.lanUrl || data.wsUrl || ''),
+              ''
+            );
+          }
+        }
+        break;
+
+      case 'join-pin':
+        if (data) {
+          const reqPin = String(data.pin || currentPin).trim();
+          if (reqPin === currentPin) {
+            const wasAlreadyConnected = relayMicConnected;
+            ensureRelayMicMarkedConnected(data.deviceName || 'Pleos Smart Mic');
+            publishRelayEvent('paired-with-car', {
+              ok: true,
+              pin: currentPin,
+              carConnected: true,
+              alreadyPaired: wasAlreadyConnected,
+              state: lastSyncedCarStateObj
+            });
+            if (lastSyncedCarStateObj) {
+              publishRelayEvent('car-state-sync', {
+                ...lastSyncedCarStateObj,
+                pin: currentPin
+              });
+            }
+            if (data.phoneIp && !wasAlreadyConnected) {
+              sendLocalWsOnly('phone-outbound-offer', {
+                phoneIp: String(data.phoneIp),
+                phonePort: Number(data.phonePort || 8082),
+                deviceName: String(data.deviceName || 'Pleos Smart Mic'),
+                pin: currentPin
+              });
+            }
+          }
+        }
+        break;
+
+      case 'mic-connected':
+        relayMicConnected = true;
+        if (window.PleosCarBridge && window.PleosCarBridge.onMicConnectionChanged) {
+          window.PleosCarBridge.onMicConnectionChanged(
+            true,
+            String(data.deviceName || 'Pleos Smart Mic'),
+            Number(data.micCount || 1)
+          );
+        }
+        break;
+
+      case 'mic-disconnected':
+        if (!fromRelay) {
+          const remaining = Number(data.micCount || 0);
+          if (remaining > 0 || relayMicConnected) {
+            if (window.PleosCarBridge && window.PleosCarBridge.onMicConnectionChanged) {
+              window.PleosCarBridge.onMicConnectionChanged(true, relayMicDeviceName, Math.max(1, remaining));
+            }
+          } else {
+            if (window.PleosCarBridge && window.PleosCarBridge.onMicConnectionChanged) {
+              window.PleosCarBridge.onMicConnectionChanged(false, 'Pleos Smart Mic', 0);
+            }
+          }
+        }
+        break;
+
+      case 'webrtc-offer':
+        if (fromRelay) ensureRelayMicMarkedConnected();
+        if (data && data.sdp) {
+          handleWebRtcOffer(data.from || 'mic', data.sdp);
+        }
+        break;
+
+      case 'webrtc-ice-candidate': {
+        const pc = peerConnections.get(data.from || 'mic') || Array.from(peerConnections.values())[0];
+        if (pc && data.candidate) {
+          pc.addIceCandidate(new RTCIceCandidate(data.candidate)).catch(() => {});
+        }
+        break;
+      }
+
+      case 'vocal-telemetry':
+        if (fromRelay) ensureRelayMicMarkedConnected();
+        if (window.PleosCarBridge && window.PleosCarBridge.onVocalTelemetry) {
+          window.PleosCarBridge.onVocalTelemetry(
+            Number(data.rms || 0),
+            Number(data.pitch || 0),
+            String(data.note || '-')
+          );
+        }
+        break;
+
+      case 'audio-pcm-chunk':
+        if (fromRelay) ensureRelayMicMarkedConnected();
+        if (data && data.pcm) {
+          playPcmChunkThroughWetEngine(data.pcm, data.sr || 16000, !!fromRelay);
+        }
+        break;
+
+      case 'remote-command':
+        if (!data || !data.type) return;
+        if (fromRelay) ensureRelayMicMarkedConnected();
+        if (data.type === 'PAUSE_SONG' || data.type === 'STOP_SONG') {
+          window.PleosCarEngine.stopSong();
+        } else if (data.type === 'CHANGE_KEY' && typeof data.keyShift === 'number') {
+          window.PleosCarEngine.setKeyShift(data.keyShift);
+        } else if (data.type === 'CHANGE_ECHO' && typeof data.echoLevel === 'number') {
+          window.PleosCarEngine.setEchoLevel(data.echoLevel);
+        }
+        if (window.PleosCarBridge && window.PleosCarBridge.onRemoteCommand) {
+          window.PleosCarBridge.onRemoteCommand(JSON.stringify(data));
+        }
+        break;
+    }
+  }
+
+  function openEmbeddedWebSocket(serverUrl, preferredPin) {
+    if (preferredPin) {
+      currentPin = String(preferredPin);
+      resubscribeRelayTopic();
+    }
+    currentServerUrl = normalizeWsUrl(serverUrl || 'ws://127.0.0.1:8080/ws');
+
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    if (ws) {
+      try {
+        ws.onclose = null;
+        ws.close();
+      } catch (e) {}
+      ws = null;
+    }
+
+    try {
+      ws = new WebSocket(currentServerUrl);
+    } catch (e) {
+      reconnectTimer = setTimeout(() => openEmbeddedWebSocket(currentServerUrl, currentPin), 1000);
+      return;
+    }
+
+    ws.onopen = () => {
+      logBridge('Connected to Embedded Ktor Server: ' + currentServerUrl);
+      sendLocalWsOnly('register-car', { pin: currentPin });
+      if (lastSyncedCarStateObj) {
+        sendLocalWsOnly('car-state-sync', { ...lastSyncedCarStateObj, pin: currentPin });
+      }
+    };
+
+    ws.onmessage = (evt) => {
+      if (evt && evt.data) {
+        handleWsMessage(evt.data, false);
+      }
+    };
+
+    ws.onerror = () => {};
+
+    ws.onclose = () => {
+      reconnectTimer = setTimeout(() => {
+        openEmbeddedWebSocket(currentServerUrl, currentPin);
+      }, 900);
+    };
+  }
+
+  function emitMusicSpectrumFrame() {
+    if (!window.PleosCarBridge || !window.PleosCarBridge.onMusicSpectrum) return;
+    if (!isPlaying) {
+      window.PleosCarBridge.onMusicSpectrum('');
+      return;
+    }
+    const bandCount = 48;
+    const out = [];
+    const t = performance.now() * 0.006;
+    for (let i = 0; i < bandCount; i++) {
+      const wave = Math.abs(Math.sin(t + i * 0.28)) * 0.55 + Math.abs(Math.cos(t * 1.4 - i * 0.15)) * 0.35;
+      const env = Math.max(0.12, 1.0 - (i / bandCount) * 0.55);
+      out.push(Math.round(Math.min(95, wave * env * (currentBackingVol || 85))));
+    }
+    window.PleosCarBridge.onMusicSpectrum(out.join(','));
+  }
+
+  window.PleosCarEngine = {
+    connectServer: function(serverUrl, preferredPin) {
+      openEmbeddedWebSocket(serverUrl || 'ws://127.0.0.1:8080/ws', preferredPin || currentPin);
+    },
+    startSong: function(songId, bpmOverride, forceSynth) {
+      const targetId = String(songId || 'kpop_neon_drive').trim();
+      const isBuiltIn = (targetId === 'kpop_neon_drive' || targetId === 'ballad_starlight_highway');
+      if (!isBuiltIn && !forceSynth) {
+        this.stopSong();
+        return;
+      }
+      currentSongId = targetId;
+      customBpm = Number(bpmOverride) || 124;
+      isPlaying = true;
+      stepIndex = 0;
+      if (schedulerTimer) clearInterval(schedulerTimer);
+      if (spectrumTimer) clearInterval(spectrumTimer);
+      spectrumTimer = setInterval(emitMusicSpectrumFrame, 45);
+      logBridge('Stage Visualizer Active (WebAudio Output Muted 0%): ' + currentSongId);
+    },
+    stopSong: function() {
+      isPlaying = false;
+      if (schedulerTimer) {
+        clearInterval(schedulerTimer);
+        schedulerTimer = null;
+      }
+      if (spectrumTimer) {
+        clearInterval(spectrumTimer);
+        spectrumTimer = null;
+      }
+      if (window.PleosCarBridge && window.PleosCarBridge.onMusicSpectrum) {
+        window.PleosCarBridge.onMusicSpectrum('');
+      }
+    },
+    setKeyShift: function(semitones) {
+      currentKeyShift = Number(semitones) || 0;
+    },
+    setEchoLevel: function(level) {
+      currentEchoLevel = Math.max(0, Math.min(100, Number(level) || 0));
+      if (wetGainNode) wetGainNode.gain.value = 0.0;
+      if (dryGainNode) dryGainNode.gain.value = 0.0;
+    },
+    setBackingVolume: function(vol) {
+      currentBackingVol = Math.max(0, Math.min(100, Number(vol) || 85));
+      if (musicMasterGain) musicMasterGain.gain.value = 0.0;
+    },
+    triggerSfx: function(sfxType) {
+      triggerSfx(sfxType);
+    },
+    syncStateToMic: function(jsonStr) {
+      try {
+        const obj = JSON.parse(jsonStr);
+        lastSyncedCarStateObj = obj;
+        sendWsEvent('car-state-sync', { ...obj, pin: currentPin });
+      } catch (e) {}
+    }
+  };
+
+  openEmbeddedWebSocket('ws://127.0.0.1:8080/ws', currentPin);
+  startAllRelayBrokers();
+
+  setInterval(function() {
+    if (lastSyncedCarStateObj) {
+      publishRelayEvent('car-state-sync', { ...lastSyncedCarStateObj, pin: currentPin });
+    } else {
+      publishRelayEvent('car-ready', { pin: currentPin });
+    }
+  }, 2200);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+﻿*.iml
+.gradle/
+**/build/
+**/local.properties
+.idea/
+.DS_Store
+*.apk
+*.aab
+*.ap_
+*.dex
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Track official submission release APKs in apk/ and demo videos in mov/
+!/apk/
+!/apk/*.apk
+!/mov/
+!/mov/*.mp4

@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>Pleos Stage Smartphone Headless Mic Engine</title>
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body style="margin:0;padding:0;background:transparent;overflow:hidden;">
+<script>
+(function() {
+  const ICE_SERVERS = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' }
+  ];
+
+  const NOTE_STRINGS = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+  let socket = null;
+  let pc = null;
+  let localStream = null;
+  let audioCtx = null;
+  let analyser = null;
+  let pcmProcessor = null;
+  let isMuted = false;
+  let currentPin = '';
+  let currentServerUrl = '';
+  let rafId = null;
+  let lastSocketTelemetryTs = 0;
+
+  function notifyNativeConnection(state, message, pin) {
+    const payload = { type: 'connection', state, message: message || '', pin: pin || currentPin };
+    if (window.PleosMicBridge && window.PleosMicBridge.onConnectionState) {
+      window.PleosMicBridge.onConnectionState(state, message || '', pin || currentPin);
+    }
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.PleosMicBridge) {
+      window.webkit.messageHandlers.PleosMicBridge.postMessage(payload);
+    }
+  }
+
+  function notifyNativeMetrics(rms, pitch, note) {
+    if (window.PleosMicBridge && window.PleosMicBridge.onAudioMetrics) {
+      window.PleosMicBridge.onAudioMetrics(rms, pitch, note);
+    }
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.PleosMicBridge) {
+      window.webkit.messageHandlers.PleosMicBridge.postMessage({
+        type: 'metrics',
+        rms,
+        pitch,
+        note
+      });
+    }
+  }
+
+  function notifyNativeCarState(stateObj) {
+    const json = JSON.stringify(stateObj || {});
+    if (window.PleosMicBridge && window.PleosMicBridge.onCarStateSync) {
+      window.PleosMicBridge.onCarStateSync(json);
+    }
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.PleosMicBridge) {
+      window.webkit.messageHandlers.PleosMicBridge.postMessage({
+        type: 'carState',
+        data: stateObj
+      });
+    }
+  }
+
+  function freqToNote(freq) {
+    if (!freq || freq < 65 || freq > 1400) return '-';
+    const noteNum = 12 * (Math.log(freq / 440) / Math.log(2));
+    const midi = Math.round(noteNum) + 69;
+    const noteName = NOTE_STRINGS[midi % 12];
+    const octave = Math.floor(midi / 12) - 1;
+    return noteName + octave;
+  }
+
+  // Autocorrelation Pitch Detection (Hz)
+  function autoCorrelatePitch(buf, sampleRate) {
+    const SIZE = buf.length;
+    let rms = 0;
+    for (let i = 0; i < SIZE; i++) {
+      const val = buf[i];
+      rms += val * val;
+    }
+    rms = Math.sqrt(rms / SIZE);
+    if (rms < 0.015) return { rms: rms, pitch: 0 };
+
+    let r1 = 0, r2 = SIZE - 1, thres = 0.2;
+    for (let i = 0; i < SIZE / 2; i++) {
+      if (Math.abs(buf[i]) < thres) { r1 = i; break; }
+    }
+    for (let i = 1; i < SIZE / 2; i++) {
+      if (Math.abs(buf[SIZE - i]) < thres) { r2 = SIZE - i; break; }
+    }
+
+    const sliced = buf.slice(r1, r2);
+    const newSize = sliced.length;
+    if (newSize < 32) return { rms, pitch: 0 };
+
+    const c = new Float32Array(newSize);
+    for (let i = 0; i < newSize; i++) {
+      let sum = 0;
+      for (let j = 0; j < newSize - i; j++) {
+        sum += sliced[j] * sliced[j + i];
+      }
+      c[i] = sum;
+    }
+
+    let d = 0;
+    while (d < newSize - 1 && c[d] > c[d + 1]) d++;
+    let maxval = -1, maxpos = -1;
+    for (let i = d; i < newSize; i++) {
+      if (c[i] > maxval) {
+        maxval = c[i];
+        maxpos = i;
+      }
+    }
+    if (maxpos <= 0) return { rms, pitch: 0 };
+    const T0 = maxpos;
+    const freq = sampleRate / T0;
+    if (freq < 65 || freq > 1300) return { rms, pitch: 0 };
+    return { rms, pitch: freq };
+  }
+
+  async function initPureVocalCapture() {
+    if (localStream) return localStream;
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    audioCtx = new AudioContextClass({ latencyHint: 'interactive' });
+    if (audioCtx.state === 'suspended') {
+      await audioCtx.resume();
+    }
+
+    // Pure studio vocal capture: disable echoCancellation, noiseSuppression, autoGainControl
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        channelCount: 1
+      },
+      video: false
+    });
+
+    const source = audioCtx.createMediaStreamSource(localStream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.65;
+    source.connect(analyser);
+
+    // Hybrid Low-Latency PCM Streamer for AAOS Emulator NAT Bridge (16kHz Int16)
+    pcmProcessor = audioCtx.createScriptProcessor(2048, 1, 1);
+    source.connect(pcmProcessor);
+    const silentGain = audioCtx.createGain();
+    silentGain.gain.value = 0.0;
+    pcmProcessor.connect(silentGain);
+    silentGain.connect(audioCtx.destination);
+
+    pcmProcessor.onaudioprocess = (e) => {
+      if (isMuted || !socket || !socket.connected) return;
+      const input = e.inputBuffer.getChannelData(0);
+      const inRate = audioCtx.sampleRate;
+      const targetRate = 16000;
+      const ratio = inRate / targetRate;
+      const outLen = Math.floor(input.length / ratio);
+      const pcm16 = new Array(outLen);
+      let energy = 0;
+      for (let i = 0; i < outLen; i++) {
+        const s = Math.max(-1, Math.min(1, input[Math.floor(i * ratio)]));
+        energy += s * s;
+        pcm16[i] = s < 0 ? Math.floor(s * 32768) : Math.floor(s * 32767);
+      }
+      if (Math.sqrt(energy / outLen) > 0.008) {
+        socket.emit('audio-pcm-chunk', {
+          pin: currentPin,
+          sr: targetRate,
+          pcm: pcm16
+        });
+      }
+    };
+
+    start60FpsLoop();
+    return localStream;
+  }
+
+  function start60FpsLoop() {
+    if (rafId) cancelAnimationFrame(rafId);
+    const timeDomainBuf = new Float32Array(analyser ? analyser.fftSize : 1024);
+
+    function loop() {
+      rafId = requestAnimationFrame(loop);
+      if (!analyser || isMuted) {
+        notifyNativeMetrics(0, 0, '-');
+        return;
+      }
+      analyser.getFloatTimeDomainData(timeDomainBuf);
+      const result = autoCorrelatePitch(timeDomainBuf, audioCtx.sampleRate);
+      // Scale RMS to 0..100 for sleek neon gauge visualization
+      const scaledRms = Math.min(100, Math.round(Math.pow(result.rms * 4.2, 0.78) * 100));
+      const pitchHz = Math.round(result.pitch * 10) / 10;
+      const note = freqToNote(pitchHz);
+
+      notifyNativeMetrics(scaledRms, pitchHz, note);
+
+      const now = performance.now();
+      if (socket && socket.connected && now - lastSocketTelemetryTs > 32) {
+        lastSocketTelemetryTs = now;
+        socket.emit('vocal-telemetry', {
+          pin: currentPin,
+          rms: scaledRms,
+          pitch: pitchHz,
+          note: note,
+          ts: Date.now()
+        });
+      }
+    }
+    loop();
+  }
+
+  async function startWebRtcOffer() {
+    if (!socket || !socket.connected) return;
+    try {
+      const stream = await initPureVocalCapture();
+      if (pc) {
+        try { pc.close(); } catch (e) {}
+      }
+      pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+      stream.getTracks().forEach((track) => {
+        pc.addTrack(track, stream);
+      });
+
+      pc.onicecandidate = (evt) => {
+        if (evt.candidate && socket) {
+          socket.emit('webrtc-ice-candidate', {
+            pin: currentPin,
+            candidate: evt.candidate
+          });
+        }
+      };
+
+      const offer = await pc.createOffer({
+        offerToReceiveAudio: false,
+        offerToReceiveVideo: false
+      });
+      await pc.setLocalDescription(offer);
+
+      socket.emit('webrtc-offer', {
+        pin: currentPin,
+        sdp: pc.localDescription
+      });
+    } catch (err) {
+      notifyNativeConnection('MIC_WARN', '마이크 권한 확인 중 (' + err.message + ')', currentPin);
+    }
+  }
+
+  function ensureSocketIoScript(serverUrl, onLoaded) {
+    if (typeof io !== 'undefined') {
+      onLoaded();
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = serverUrl.replace(/\/$/, '') + '/socket.io/socket.io.js';
+    script.onload = () => onLoaded();
+    script.onerror = () => {
+      notifyNativeConnection('ERROR', '시그널링 서버에 연결할 수 없습니다: ' + serverUrl, currentPin);
+    };
+    document.head.appendChild(script);
+  }
+
+  window.PleosMicEngine = {
+    connectToRoom: function(serverUrl, pin, deviceName) {
+      currentServerUrl = (serverUrl || window.location.origin).replace(/\/$/, '');
+      currentPin = String(pin || '4829').trim();
+
+      notifyNativeConnection('CONNECTING', '차량 스테이지 서버 연결 중...', currentPin);
+
+      ensureSocketIoScript(currentServerUrl, () => {
+        if (socket) {
+          try { socket.disconnect(); } catch (e) {}
+        }
+        socket = io(currentServerUrl, {
+          transports: ['websocket', 'polling'],
+          reconnection: true,
+          timeout: 6000
+        });
+
+        socket.on('connect', () => {
+          socket.emit('join-pin', {
+            pin: currentPin,
+            deviceName: deviceName || 'Pleos Smart Mic'
+          }, async (resp) => {
+            if (resp && resp.ok) {
+              currentPin = resp.pin;
+              notifyNativeConnection('CONNECTED', '차량 페어링 완료 (PIN ' + currentPin + ')', currentPin);
+              if (resp.state) notifyNativeCarState(resp.state);
+              await startWebRtcOffer();
+            } else {
+              notifyNativeConnection('ERROR', (resp && resp.error) || 'PIN 매칭 실패', currentPin);
+            }
+          });
+        });
+
+        socket.on('car-ready', () => {
+          startWebRtcOffer();
+        });
+
+        socket.on('webrtc-answer', async (data) => {
+          if (pc && data && data.sdp) {
+            try {
+              await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+              notifyNativeConnection('STREAMING', '실시간 무지연 보컬 스트리밍 중', currentPin);
+            } catch (e) {}
+          }
+        });
+
+        socket.on('webrtc-ice-candidate', (data) => {
+          if (pc && data && data.candidate) {
+            pc.addIceCandidate(new RTCIceCandidate(data.candidate)).catch(() => {});
+          }
+        });
+
+        socket.on('car-state-sync', (state) => {
+          notifyNativeCarState(state);
+        });
+
+        socket.on('connect_error', (err) => {
+          notifyNativeConnection('ERROR', '서버 연결 실패 (' + err.message + ')', currentPin);
+        });
+      });
+    },
+
+    sendRemoteCommand: function(jsonStr) {
+      if (!socket || !socket.connected) return;
+      try {
+        const cmd = typeof jsonStr === 'string' ? JSON.parse(jsonStr) : jsonStr;
+        socket.emit('remote-command', { ...cmd, pin: currentPin });
+      } catch (e) {}
+    },
+
+    setMuted: function(muted) {
+      isMuted = !!muted;
+      if (localStream) {
+        localStream.getAudioTracks().forEach(t => { t.enabled = !isMuted; });
+      }
+    }
+  };
+})();
+</script>
+</body>
+</html>

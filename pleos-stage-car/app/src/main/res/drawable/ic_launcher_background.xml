@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Deep Obsidian-Indigo AI Base Canvas -->
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="0"
+                android:startY="0"
+                android:endX="108"
+                android:endY="108"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#080B14" />
+                <item android:offset="0.52" android:color="#10172A" />
+                <item android:offset="1.0" android:color="#1B102E" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Soft Radial AI Aurora Glow in Center -->
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:centerX="54"
+                android:centerY="56"
+                android:gradientRadius="48"
+                android:type="radial">
+                <item android:offset="0.0" android:color="#406366F1" />
+                <item android:offset="0.55" android:color="#222B95F6" />
+                <item android:offset="1.0" android:color="#00080B14" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

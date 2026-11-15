@@ -1,0 +1,16 @@
+{
+  "name": "pleos-stage-server",
+  "version": "1.0.0",
+  "description": "Pleos Stage WebRTC Signaling, QR/PIN Room Pairing & WebAudio Engine Server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "tunnel": "node tunnel.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.1",
+    "localtunnel": "^2.0.2",
+    "socket.io": "^4.8.1"
+  }
+}

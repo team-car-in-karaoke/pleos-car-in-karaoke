@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>Pleos Stage Car Wet-Only Audio & WebRTC Engine</title>
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body style="margin:0;background:#0B0E14;color:#00E5FF;font-family:monospace;font-size:11px;">
+<div id="status">PLEOS CAR ENGINE INITIALIZING...</div>
+<script>
+(function() {
+  const ICE_SERVERS = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' }
+  ];
+
+  let socket = null;
+  let peerConnections = new Map(); // micId -> RTCPeerConnection
+  let audioCtx = null;
+  let wetGainNode = null;
+  let dryGainNode = null; // Strictly 0.0 (Wet-Only Reverb Engine)
+  let convolverNode = null;
+  let delayNodeL = null;
+  let delayNodeR = null;
+  let feedbackGain = null;
+  let musicMasterGain = null;
+
+  let currentPin = '4829';
+  let currentKeyShift = 0;
+  let currentEchoLevel = 80; // 0..100
+  let isPlaying = false;
+  let currentSongId = 'kpop_neon_drive';
+  let songStartTime = 0;
+  let schedulerTimer = null;
+  let stepIndex = 0;
+  let webRtcTrackActive = false;
+  let nextPcmPlayTime = 0;
+
+  function logBridge(msg) {
+    console.log('[PleosCarEngine]', msg);
+    const el = document.getElementById('status');
+    if (el) el.innerText = msg;
+    if (window.PleosCarBridge && window.PleosCarBridge.onEngineLog) {
+      window.PleosCarBridge.onEngineLog(String(msg));
+    }
+  }
+
+  // Initialize Web Audio API with Wet-Only Concert Hall Reverb Pipeline
+  function ensureAudioContext() {
+    if (!audioCtx) {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      audioCtx = new AudioContextClass({ latencyHint: 'interactive', sampleRate: 48000 });
+
+      // 1. Strictly Muted Dry Gain (0.0) - Prevents DAF & Acoustic Howling
+      dryGainNode = audioCtx.createGain();
+      dryGainNode.gain.value = 0.0;
+
+      // 2. Wet Reverb & Stereo Delay Chain (100% Wet-Only Output)
+      wetGainNode = audioCtx.createGain();
+      wetGainNode.gain.value = (currentEchoLevel / 100.0) * 1.35;
+
+      // Synthesize a rich 2.8-second Concert Hall Impulse Response
+      convolverNode = audioCtx.createConvolver();
+      convolverNode.buffer = createConcertHallImpulse(audioCtx, 2.8, 2.4);
+
+      // Stereo Ping-Pong Delay + Warm Lowpass Filter for Stage Echo
+      delayNodeL = audioCtx.createDelay(1.0);
+      delayNodeR = audioCtx.createDelay(1.0);
+      delayNodeL.delayTime.value = 0.135;
+      delayNodeR.delayTime.value = 0.195;
+
+      feedbackGain = audioCtx.createGain();
+      feedbackGain.gain.value = 0.36;
+
+      const dampFilter = audioCtx.createBiquadFilter();
+      dampFilter.type = 'lowpass';
+      dampFilter.frequency.value = 3000;
+
+      delayNodeL.connect(delayNodeR);
+      delayNodeR.connect(dampFilter);
+      dampFilter.connect(feedbackGain);
+      feedbackGain.connect(delayNodeL);
+
+      // Dynamics Compressor for lush concert mastering
+      const masterComp = audioCtx.createDynamicsCompressor();
+      masterComp.threshold.value = -16;
+      masterComp.knee.value = 18;
+      masterComp.ratio.value = 4;
+      masterComp.attack.value = 0.003;
+      masterComp.release.value = 0.20;
+
+      convolverNode.connect(wetGainNode);
+      delayNodeL.connect(wetGainNode);
+      delayNodeR.connect(wetGainNode);
+
+      // Dry stays 0.0; only Wet goes to destination
+      dryGainNode.connect(masterComp);
+      wetGainNode.connect(masterComp);
+      masterComp.connect(audioCtx.destination);
+
+      // Backing track master gain
+      musicMasterGain = audioCtx.createGain();
+      musicMasterGain.gain.value = 0.45;
+      musicMasterGain.connect(masterComp);
+
+      logBridge('Wet-Only Reverb Engine Ready (Dry=0%, Wet=' + currentEchoLevel + '%)');
+    }
+    if (audioCtx.state === 'suspended') {
+      audioCtx.resume();
+    }
+    return audioCtx;
+  }
+
+  function createConcertHallImpulse(ctx, durationSec, decayRate) {
+    const rate = ctx.sampleRate;
+    const length = Math.floor(rate * durationSec);
+    const impulse = ctx.createBuffer(2, length, rate);
+    const left = impulse.getChannelData(0);
+    const right = impulse.getChannelData(1);
+
+    for (let i = 0; i < length; i++) {
+      // Pre-delay of 18ms so only lush Concert Hall early reflections + tail emerge
+      if (i < rate * 0.018) {
+        left[i] = 0;
+        right[i] = 0;
+        continue;
+      }
+      const n = i / length;
+      const envelope = Math.pow(1 - n, decayRate);
+      // Early reflection bursts + diffuse hall tail
+      const earlyBoost = (i < rate * 0.09) ? 1.35 : 1.0;
+      left[i] = ((Math.random() * 2 - 1) * envelope * earlyBoost) * 0.65;
+      right[i] = ((Math.random() * 2 - 1) * envelope * earlyBoost) * 0.65;
+    }
+    return impulse;
+  }
+
+  // Connect an incoming WebRTC MediaStream into the Wet-Only Reverb Engine
+  function attachVocalStreamToWetEngine(stream) {
+    const ctx = ensureAudioContext();
+
+    // Hidden muted <audio> element required by Chromium WebView to pump remote WebRTC stream
+    let hiddenAudio = document.getElementById('webrtc-stream-sink');
+    if (!hiddenAudio) {
+      hiddenAudio = document.createElement('audio');
+      hiddenAudio.id = 'webrtc-stream-sink';
+      hiddenAudio.autoplay = true;
+      hiddenAudio.muted = true; // Muted DOM element so ZERO dry audio leaks!
+      document.body.appendChild(hiddenAudio);
+    }
+    hiddenAudio.srcObject = stream;
+    hiddenAudio.play().catch(() => {});
+
+    const source = ctx.createMediaStreamSource(stream);
+
+    // Vocal EQ: High-pass 110Hz (cut boominess) + Presence boost 3.2kHz
+    const hpFilter = ctx.createBiquadFilter();
+    hpFilter.type = 'highpass';
+    hpFilter.frequency.value = 110;
+
+    const airFilter = ctx.createBiquadFilter();
+    airFilter.type = 'peaking';
+    airFilter.frequency.value = 3200;
+    airFilter.Q.value = 1.1;
+    airFilter.gain.value = 4.5;
+
+    source.connect(hpFilter);
+    hpFilter.connect(airFilter);
+
+    // Dry path -> dryGainNode (strictly 0.0 gain)
+    airFilter.connect(dryGainNode);
+
+    // Wet path -> ConvolverNode + Ping-Pong Delay -> wetGainNode (100% Wet)
+    airFilter.connect(convolverNode);
+    airFilter.connect(delayNodeL);
+
+    webRtcTrackActive = true;
+    logBridge('WebRTC Opus Stream Attached to Wet-Only Convolver');
+  }
+
+  // Fallback PCM Chunk Player routed into the exact same Wet-Only Reverb Pipeline
+  function playPcmChunkThroughWetEngine(pcmArray, sampleRate) {
+    if (webRtcTrackActive) return; // Prefer direct WebRTC Opus when active
+    if (!pcmArray || !pcmArray.length) return;
+    const ctx = ensureAudioContext();
+    const sr = sampleRate || 16000;
+    const buf = ctx.createBuffer(1, pcmArray.length, sr);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < pcmArray.length; i++) {
+      ch[i] = pcmArray[i] / 32768.0;
+    }
+
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+
+    const hpFilter = ctx.createBiquadFilter();
+    hpFilter.type = 'highpass';
+    hpFilter.frequency.value = 115;
+
+    src.connect(hpFilter);
+    hpFilter.connect(convolverNode);
+    hpFilter.connect(delayNodeL);
+
+    const now = ctx.currentTime;
+    if (nextPcmPlayTime < now || nextPcmPlayTime > now + 0.25) {
+      nextPcmPlayTime = now + 0.02;
+    }
+    src.start(nextPcmPlayTime);
+    nextPcmPlayTime += buf.duration;
+  }
+
+  // Setup WebRTC PeerConnection for a Smartphone Mic
+  async function handleWebRtcOffer(fromMicId, sdp) {
+    ensureAudioContext();
+    let pc = peerConnections.get(fromMicId);
+    if (pc) {
+      try { pc.close(); } catch (e) {}
+    }
+
+    pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    peerConnections.set(fromMicId, pc);
+
+    pc.onicecandidate = (evt) => {
+      if (evt.candidate && socket) {
+        socket.emit('webrtc-ice-candidate', {
+          pin: currentPin,
+          candidate: evt.candidate
+        });
+      }
+    };
+
+    pc.ontrack = (evt) => {
+      if (evt.streams && evt.streams[0]) {
+        attachVocalStreamToWetEngine(evt.streams[0]);
+        if (window.PleosCarBridge && window.PleosCarBridge.onWebRtcConnected) {
+          window.PleosCarBridge.onWebRtcConnected(fromMicId);
+        }
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      logBridge('WebRTC State: ' + pc.connectionState);
+      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+        webRtcTrackActive = false;
+      }
+    };
+
+    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+
+    socket.emit('webrtc-answer', {
+      pin: currentPin,
+      sdp: pc.localDescription
+    });
+  }
+
+  // Built-in Demo Backing Tracks (Web Audio Synthesizer)
+  const SONGS = {
+    kpop_neon_drive: {
+      bpm: 124,
+      bassNotes: [130.81, 130.81, 164.81, 196.00, 146.83, 146.83, 174.61, 220.00, 110.00, 110.00, 130.81, 164.81, 196.00, 196.00, 185.00, 196.00],
+      leadNotes: [261.63, 329.63, 392.00, 523.25, 493.88, 392.00, 329.63, 293.66, 349.23, 440.00, 523.25, 587.33, 523.25, 493.88, 440.00, 392.00],
+      style: 'upbeat'
+    },
+    ballad_starlight_highway: {
+      bpm: 76,
+      bassNotes: [110.00, 164.81, 220.00, 164.81, 87.31, 130.81, 174.61, 130.81, 130.81, 196.00, 261.63, 196.00, 98.00, 146.83, 196.00, 246.94],
+      leadNotes: [220.00, 261.63, 329.63, 392.00, 349.23, 329.63, 293.66, 261.63, 261.63, 329.63, 392.00, 523.25, 493.88, 440.00, 392.00, 329.63],
+      style: 'ballad'
+    }
+  };
+
+  function shiftFreq(freq, semitones) {
+    return freq * Math.pow(2, semitones / 12.0);
+  }
+
+  function playSynthStep() {
+    if (!isPlaying) return;
+    const ctx = ensureAudioContext();
+    const song = SONGS[currentSongId] || SONGS.kpop_neon_drive;
+    const stepDuration = (60 / song.bpm) / 2; // 8th notes
+    const now = ctx.currentTime;
+    const idx = stepIndex % song.bassNotes.length;
+
+    // 1. Bass / Arpeggio note
+    const bassFreq = shiftFreq(song.bassNotes[idx], currentKeyShift);
+    const bassOsc = ctx.createOscillator();
+    const bassGain = ctx.createGain();
+    bassOsc.type = song.style === 'upbeat' ? 'sawtooth' : 'triangle';
+    bassOsc.frequency.setValueAtTime(bassFreq, now);
+
+    const bassFilter = ctx.createBiquadFilter();
+    bassFilter.type = 'lowpass';
+    bassFilter.frequency.setValueAtTime(song.style === 'upbeat' ? 680 : 420, now);
+
+    bassGain.gain.setValueAtTime(0.26, now);
+    bassGain.gain.exponentialRampToValueAtTime(0.001, now + stepDuration * 0.9);
+
+    bassOsc.connect(bassFilter);
+    bassFilter.connect(bassGain);
+    bassGain.connect(musicMasterGain);
+    bassOsc.start(now);
+    bassOsc.stop(now + stepDuration);
+
+    // 2. Lead Synth / Pad Harmony
+    const leadFreq = shiftFreq(song.leadNotes[idx], currentKeyShift);
+    const leadOsc = ctx.createOscillator();
+    const leadGain = ctx.createGain();
+    leadOsc.type = song.style === 'upbeat' ? 'square' : 'sine';
+    leadOsc.frequency.setValueAtTime(leadFreq, now);
+
+    leadGain.gain.setValueAtTime(0.11, now);
+    leadGain.gain.exponentialRampToValueAtTime(0.001, now + stepDuration * 1.4);
+
+    leadOsc.connect(convolverNode); // Lush spatial backing
+    leadOsc.connect(leadGain);
+    leadGain.connect(musicMasterGain);
+    leadOsc.start(now);
+    leadOsc.stop(now + stepDuration * 1.4);
+
+    // 3. Kick & Hi-Hat for Upbeat K-Pop track
+    if (song.style === 'upbeat' && idx % 2 === 0) {
+      const kickOsc = ctx.createOscillator();
+      const kickGain = ctx.createGain();
+      kickOsc.frequency.setValueAtTime(135, now);
+      kickOsc.frequency.exponentialRampToValueAtTime(38, now + 0.12);
+      kickGain.gain.setValueAtTime(0.5, now);
+      kickGain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+      kickOsc.connect(kickGain);
+      kickGain.connect(musicMasterGain);
+      kickOsc.start(now);
+      kickOsc.stop(now + 0.16);
+    }
+
+    stepIndex++;
+  }
+
+  // Stage Sound Effects (Applause, Cheer, Tambourine)
+  function triggerSfx(sfxType) {
+    const ctx = ensureAudioContext();
+    const now = ctx.currentTime;
+    if (sfxType === 'TAMBOURINE') {
+      for (let j = 0; j < 3; j++) {
+        const osc = ctx.createOscillator();
+        const g = ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(6200 + j * 1400, now);
+        g.gain.setValueAtTime(0.18, now);
+        g.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+        osc.connect(g);
+        g.connect(convolverNode);
+        g.connect(musicMasterGain);
+        osc.start(now);
+        osc.stop(now + 0.1);
+      }
+    } else if (sfxType === 'APPLAUSE' || sfxType === 'CHEER') {
+      const dur = 1.6;
+      const bufferSize = ctx.sampleRate * dur;
+      const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+      const data = noiseBuffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) {
+        const env = Math.sin((i / bufferSize) * Math.PI);
+        data[i] = (Math.random() * 2 - 1) * env;
+      }
+      const noise = ctx.createBufferSource();
+      noise.buffer = noiseBuffer;
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = sfxType === 'CHEER' ? 1850 : 1200;
+      bp.Q.value = 1.5;
+      const g = ctx.createGain();
+      g.gain.value = 0.45;
+      noise.connect(bp);
+      bp.connect(g);
+      g.connect(convolverNode);
+      g.connect(musicMasterGain);
+      noise.start(now);
+    }
+  }
+
+  // Expose Control API to Kotlin Native UI (`window.PleosCarEngine`)
+  window.PleosCarEngine = {
+    connectServer: function(serverUrl, preferredPin) {
+      if (preferredPin) currentPin = String(preferredPin);
+      if (socket) {
+        try { socket.disconnect(); } catch (e) {}
+      }
+      if (typeof io === 'undefined') {
+        logBridge('Socket.io running in offline standalone synthesizer mode');
+        return;
+      }
+      socket = io(serverUrl || window.location.origin, {
+        transports: ['websocket', 'polling'],
+        reconnection: true
+      });
+
+      socket.on('connect', () => {
+        logBridge('Connected to Signaling Server (' + socket.id + ')');
+        socket.emit('register-car', { pin: currentPin }, (resp) => {
+          if (resp && resp.ok) {
+            currentPin = resp.pin;
+            if (window.PleosCarBridge && window.PleosCarBridge.onRoomRegistered) {
+              window.PleosCarBridge.onRoomRegistered(
+                resp.pin,
+                resp.lanUrl || '',
+                resp.tunnelUrl || ''
+              );
+            }
+          }
+        });
+      });
+
+      socket.on('tunnel-updated', (data) => {
+        if (data && data.tunnelUrl && window.PleosCarBridge && window.PleosCarBridge.onTunnelUpdated) {
+          window.PleosCarBridge.onTunnelUpdated(data.tunnelUrl);
+        }
+      });
+
+      socket.on('mic-connected', (data) => {
+        ensureAudioContext();
+        if (window.PleosCarBridge && window.PleosCarBridge.onMicConnectionChanged) {
+          window.PleosCarBridge.onMicConnectionChanged(true, data.deviceName || 'Pleos Smart Mic', data.micCount || 1);
+        }
+      });
+
+      socket.on('mic-disconnected', (data) => {
+        if (window.PleosCarBridge && window.PleosCarBridge.onMicConnectionChanged) {
+          window.PleosCarBridge.onMicConnectionChanged((data.micCount || 0) > 0, 'Pleos Smart Mic', data.micCount || 0);
+        }
+      });
+
+      socket.on('webrtc-offer', (data) => {
+        if (data && data.sdp) {
+          handleWebRtcOffer(data.from, data.sdp);
+        }
+      });
+
+      socket.on('webrtc-ice-candidate', (data) => {
+        const pc = peerConnections.get(data.from);
+        if (pc && data.candidate) {
+          pc.addIceCandidate(new RTCIceCandidate(data.candidate)).catch(() => {});
+        }
+      });
+
+      socket.on('vocal-telemetry', (data) => {
+        if (window.PleosCarBridge && window.PleosCarBridge.onVocalTelemetry) {
+          window.PleosCarBridge.onVocalTelemetry(
+            Number(data.rms || 0),
+            Number(data.pitch || 0),
+            String(data.note || '-')
+          );
+        }
+      });
+
+      socket.on('audio-pcm-chunk', (data) => {
+        if (data && data.pcm) {
+          playPcmChunkThroughWetEngine(data.pcm, data.sr || 16000);
+        }
+      });
+
+      socket.on('remote-command', (cmd) => {
+        if (!cmd || !cmd.type) return;
+        if (cmd.type === 'START_SONG') {
+          window.PleosCarEngine.startSong(cmd.songId || currentSongId);
+        } else if (cmd.type === 'PAUSE_SONG' || cmd.type === 'STOP_SONG') {
+          window.PleosCarEngine.stopSong();
+        } else if (cmd.type === 'SELECT_SONG' && cmd.songId) {
+          currentSongId = cmd.songId;
+        } else if (cmd.type === 'CHANGE_KEY' && typeof cmd.keyShift === 'number') {
+          window.PleosCarEngine.setKeyShift(cmd.keyShift);
+        } else if (cmd.type === 'CHANGE_ECHO' && typeof cmd.echoLevel === 'number') {
+          window.PleosCarEngine.setEchoLevel(cmd.echoLevel);
+        } else if (cmd.type === 'TRIGGER_SFX' && cmd.sfx) {
+          triggerSfx(cmd.sfx);
+        }
+        if (window.PleosCarBridge && window.PleosCarBridge.onRemoteCommand) {
+          window.PleosCarBridge.onRemoteCommand(JSON.stringify(cmd));
+        }
+      });
+    },
+
+    startSong: function(songId) {
+      ensureAudioContext();
+      if (songId) currentSongId = songId;
+      isPlaying = true;
+      stepIndex = 0;
+      if (schedulerTimer) clearInterval(schedulerTimer);
+      const song = SONGS[currentSongId] || SONGS.kpop_neon_drive;
+      const intervalMs = ((60 / song.bpm) / 2) * 1000;
+      playSynthStep();
+      schedulerTimer = setInterval(playSynthStep, intervalMs);
+      logBridge('Playing Backing Track: ' + currentSongId);
+    },
+
+    stopSong: function() {
+      isPlaying = false;
+      if (schedulerTimer) {
+        clearInterval(schedulerTimer);
+        schedulerTimer = null;
+      }
+      logBridge('Song Stopped');
+    },
+
+    setKeyShift: function(semitones) {
+      currentKeyShift = Number(semitones) || 0;
+      logBridge('Key Shift: ' + currentKeyShift);
+    },
+
+    setEchoLevel: function(level) {
+      currentEchoLevel = Math.max(0, Math.min(100, Number(level) || 0));
+      if (wetGainNode) {
+        wetGainNode.gain.value = (currentEchoLevel / 100.0) * 1.45;
+      }
+      if (dryGainNode) {
+        dryGainNode.gain.value = 0.0; // Strictly keep Dry = 0%
+      }
+    },
+
+    triggerSfx: function(sfxType) {
+      triggerSfx(sfxType);
+    },
+
+    syncStateToMic: function(jsonStr) {
+      if (socket && socket.connected) {
+        try {
+          const obj = JSON.parse(jsonStr);
+          socket.emit('car-state-sync', { ...obj, pin: currentPin });
+        } catch (e) {}
+      }
+    }
+  };
+
+  // Auto-connect if loaded directly from server
+  const params = new URLSearchParams(window.location.search);
+  const autoPin = params.get('pin') || '4829';
+  const autoServer = params.get('server') || window.location.origin;
+  if (typeof io !== 'undefined') {
+    window.PleosCarEngine.connectServer(autoServer, autoPin);
+  }
+})();
+</script>
+</body>
+</html>

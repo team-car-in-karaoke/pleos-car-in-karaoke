@@ -1,0 +1,79 @@
+{
+  "packageName": "io.github.teamcarinkaraoke.pleosstage.car",
+  "invokeWord": "카인노래방",
+  "appDescription": "Car in Karaoke (카인노래방) is an in-vehicle 4D concert hall and smartphone wireless karaoke app for Pleos Connect.",
+  "actionCalls": [
+    {
+      "function": {
+        "name": "PLAY_KARAOKE_SONG",
+        "description": "Search for a karaoke song by keyword or song title, add it to the in-vehicle stage playlist, and immediately start playback.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "searchTerm": {
+              "type": "string",
+              "description": "Keyword, song title, artist name, or YouTube URL to search and play in the karaoke stage."
+            }
+          },
+          "required": [
+            "searchTerm"
+          ]
+        }
+      }
+    },
+    {
+      "function": {
+        "name": "SET_STAGE_SOUND_MODE",
+        "description": "Configure the in-vehicle 4D karaoke stage sound acoustic preset and optionally toggle the vocal guide melody.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "soundPreset": {
+              "type": "string",
+              "enum": [
+                "CONCERT_HALL",
+                "STUDIO",
+                "PASSENGER_CLUB",
+                "DRIVER_SAFE"
+              ],
+              "description": "Target stage sound acoustic preset mode to apply."
+            },
+            "guideVocalEnabled": {
+              "type": "boolean",
+              "description": "Optional flag to enable or disable the vocal guide melody and pitch synthesis."
+            }
+          },
+          "required": [
+            "soundPreset"
+          ]
+        }
+      }
+    },
+    {
+      "function": {
+        "name": "CONTROL_STAGE_PLAYBACK",
+        "description": "Execute playback and pitch key shift control commands on the active karaoke stage.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "enum": [
+                "PLAY",
+                "PAUSE",
+                "NEXT_SONG",
+                "PREV_SONG",
+                "KEY_UP",
+                "KEY_DOWN"
+              ],
+              "description": "Stage playback or key transposition command to execute."
+            }
+          },
+          "required": [
+            "command"
+          ]
+        }
+      }
+    }
+  ]
+}

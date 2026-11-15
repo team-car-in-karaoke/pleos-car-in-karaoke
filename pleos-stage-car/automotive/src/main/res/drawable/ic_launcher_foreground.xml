@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Subtle Stage Upward Spotlight Cone -->
+    <path android:pathData="M36,72 L46,28 L62,28 L72,72 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="54"
+                android:startY="72"
+                android:endX="54"
+                android:endY="28"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#3800E5FF" />
+                <item android:offset="0.6" android:color="#188B5CF6" />
+                <item android:offset="1.0" android:color="#00FF2E93" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Minimalist 3D Stage Ring Outer Halo (AI Multi-Stop Gradient) -->
+    <path
+        android:pathData="M24,69.5 C24,64.25 37.43,60 54,60 C70.57,60 84,64.25 84,69.5 C84,74.75 70.57,79 54,79 C37.43,79 24,74.75 24,69.5 Z"
+        android:strokeWidth="3.2"
+        android:fillColor="#1A00E5FF">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:startX="24"
+                android:startY="69.5"
+                android:endX="84"
+                android:endY="69.5"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#00E5FF" />
+                <item android:offset="0.38" android:color="#3B82F6" />
+                <item android:offset="0.72" android:color="#8B5CF6" />
+                <item android:offset="1.0" android:color="#FF2E93" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Inner Stage Orbit Line -->
+    <path
+        android:pathData="M33,69.5 C33,66.46 42.4,64 54,64 C65.6,64 75,66.46 75,69.5 C75,72.54 65.6,75 54,75 C42.4,75 33,72.54 33,69.5 Z"
+        android:strokeWidth="1.4"
+        android:fillColor="#00000000"
+        android:strokeColor="#66FFFFFF" />
+
+    <!-- Left Outer Soundwave Pill -->
+    <path android:pathData="M35,51 C36.66,51 38,52.34 38,54 L38,61 C38,62.66 36.66,64 35,64 C33.34,64 32,62.66 32,61 L32,54 C32,52.34 33.34,51 35,51 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="35"
+                android:startY="51"
+                android:endX="35"
+                android:endY="64"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#00F0FF" />
+                <item android:offset="1.0" android:color="#2B95F6" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Left Inner Soundwave Pill -->
+    <path android:pathData="M44.5,42 C46.16,42 47.5,43.34 47.5,45 L47.5,63 C47.5,64.66 46.16,66 44.5,66 C42.84,66 41.5,64.66 41.5,63 L41.5,45 C41.5,43.34 42.84,42 44.5,42 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="44.5"
+                android:startY="42"
+                android:endX="44.5"
+                android:endY="66"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#38BDF8" />
+                <item android:offset="1.0" android:color="#6366F1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Center Lead Vocal Pill (Tallest with AI Gradient) -->
+    <path android:pathData="M54,33 C55.93,33 57.5,34.57 57.5,36.5 L57.5,65.5 C57.5,67.43 55.93,69 54,69 C52.07,69 50.5,67.43 50.5,65.5 L50.5,36.5 C50.5,34.57 52.07,33 54,33 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="54"
+                android:startY="33"
+                android:endX="54"
+                android:endY="69"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FFFFFF" />
+                <item android:offset="0.28" android:color="#00E5FF" />
+                <item android:offset="0.68" android:color="#8B5CF6" />
+                <item android:offset="1.0" android:color="#FF2E93" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Right Inner Soundwave Pill -->
+    <path android:pathData="M63.5,42 C65.16,42 66.5,43.34 66.5,45 L66.5,63 C66.5,64.66 65.16,66 63.5,66 C61.84,66 60.5,64.66 60.5,63 L60.5,45 C60.5,43.34 61.84,42 63.5,42 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="63.5"
+                android:startY="42"
+                android:endX="63.5"
+                android:endY="66"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#A855F7" />
+                <item android:offset="1.0" android:color="#EC4899" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Right Outer Soundwave Pill -->
+    <path android:pathData="M73,51 C74.66,51 76,52.34 76,54 L76,61 C76,62.66 74.66,64 73,64 C71.34,64 70,62.66 70,61 L70,54 C70,52.34 71.34,51 73,51 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="73"
+                android:startY="51"
+                android:endX="73"
+                android:endY="64"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FF2E93" />
+                <item android:offset="1.0" android:color="#FFB300" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Minimalist AI 4-Point Star Sparkle Above Stage Center -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,21 C54.6,24.4 55.6,25.4 59,26 C55.6,26.6 54.6,27.6 54,31 C53.4,27.6 52.4,26.6 49,26 C52.4,25.4 53.4,24.4 54,21 Z" />
+</vector>

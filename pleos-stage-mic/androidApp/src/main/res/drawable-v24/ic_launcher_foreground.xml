@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Subtle Stage Upward Spotlight Cone -->
+    <path android:pathData="M36,72 L45,26 L63,26 L72,72 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="54"
+                android:startY="72"
+                android:endX="54"
+                android:endY="26"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#3800E5FF" />
+                <item android:offset="0.6" android:color="#188B5CF6" />
+                <item android:offset="1.0" android:color="#00FF2E93" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Minimalist 3D Stage Ring Outer Halo (Same AI Multi-Stop Gradient as Car App) -->
+    <path
+        android:pathData="M24,69.5 C24,64.25 37.43,60 54,60 C70.57,60 84,64.25 84,69.5 C84,74.75 70.57,79 54,79 C37.43,79 24,74.75 24,69.5 Z"
+        android:strokeWidth="3.2"
+        android:fillColor="#1A00E5FF">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:startX="24"
+                android:startY="69.5"
+                android:endX="84"
+                android:endY="69.5"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#00E5FF" />
+                <item android:offset="0.38" android:color="#3B82F6" />
+                <item android:offset="0.72" android:color="#8B5CF6" />
+                <item android:offset="1.0" android:color="#FF2E93" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Inner Stage Orbit Line -->
+    <path
+        android:pathData="M33,69.5 C33,66.46 42.4,64 54,64 C65.6,64 75,66.46 75,69.5 C75,72.54 65.6,75 54,75 C42.4,75 33,72.54 33,69.5 Z"
+        android:strokeWidth="1.4"
+        android:fillColor="#00000000"
+        android:strokeColor="#66FFFFFF" />
+
+    <!-- Left Soundwave Accent Pill -->
+    <path android:pathData="M33,47 C34.66,47 36,48.34 36,50 L36,60 C36,61.66 34.66,63 33,63 C31.34,63 30,61.66 30,60 L30,50 C30,48.34 31.34,47 33,47 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="33"
+                android:startY="47"
+                android:endX="33"
+                android:endY="63"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#00F0FF" />
+                <item android:offset="1.0" android:color="#2B95F6" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Right Soundwave Accent Pill -->
+    <path android:pathData="M75,47 C76.66,47 78,48.34 78,50 L78,60 C78,61.66 76.66,63 75,63 C73.34,63 72,61.66 72,60 L72,50 C72,48.34 73.34,47 75,47 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="75"
+                android:startY="47"
+                android:endX="75"
+                android:endY="63"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FF2E93" />
+                <item android:offset="1.0" android:color="#FFB300" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Center Minimalist AI Gradient Microphone Capsule -->
+    <path android:pathData="M54,31 C58.42,31 62,34.58 62,39 L62,48 C62,52.42 58.42,56 54,56 C49.58,56 46,52.42 46,48 L46,39 C46,34.58 49.58,31 54,31 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="46"
+                android:startY="31"
+                android:endX="62"
+                android:endY="56"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FFFFFF" />
+                <item android:offset="0.28" android:color="#00E5FF" />
+                <item android:offset="0.68" android:color="#8B5CF6" />
+                <item android:offset="1.0" android:color="#FF2E93" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Subtle Studio Mic Capsule Grille Lines -->
+    <path
+        android:pathData="M49,39 L59,39 M48.5,43.5 L59.5,43.5"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round"
+        android:strokeColor="#550A0E18" />
+
+    <!-- Microphone U-Cradle Yoke & Stand Stem Anchored to Stage Ring -->
+    <path
+        android:pathData="M41.5,47.5 C41.5,55 47,60.5 54,60.5 C61,60.5 66.5,55 66.5,47.5 M54,60.5 L54,69.5 M47,69.5 L61,69.5"
+        android:strokeWidth="3.0"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:startX="41.5"
+                android:startY="47.5"
+                android:endX="66.5"
+                android:endY="69.5"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#00E5FF" />
+                <item android:offset="0.5" android:color="#FFFFFF" />
+                <item android:offset="1.0" android:color="#FF2E93" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Minimalist AI 4-Point Star Sparkle Above Microphone -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,19.5 C54.6,22.9 55.6,23.9 59,24.5 C55.6,25.1 54.6,26.1 54,29.5 C53.4,26.1 52.4,25.1 49,24.5 C52.4,23.9 53.4,22.9 54,19.5 Z" />
+</vector>
